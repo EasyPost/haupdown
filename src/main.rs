@@ -1,13 +1,14 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
-use std::error::Error;
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{self, Arg};
-use derive_more::Display;
-use log::{error, info, warn};
+use derive_more::{Display, Error, From};
+use log::{debug, error, info, warn};
 use rusqlite::OptionalExtension;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -15,7 +16,10 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
 fn current_unix_timestamp() -> i64 {
-    unimplemented!();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_secs() as i64
 }
 
 struct UpDownStateInner {
@@ -27,7 +31,7 @@ impl UpDownStateInner {
     fn set_state(
         &mut self,
         servicename: String,
-        downed_by: Option<String>,
+        downed_by: String,
         mark_down: bool,
     ) -> Result<(), rusqlite::Error> {
         let transaction = self
@@ -36,15 +40,16 @@ impl UpDownStateInner {
         let previously_downed_by: Option<String> = {
             let mut stmt =
                 transaction.prepare("SELECT * FROM down_services WHERE servicename=?")?;
-            stmt.query_row(rusqlite::params![], |row| row.get(1))
+            stmt.query_row(rusqlite::params![&servicename], |row| row.get(1))
                 .optional()?
         };
         let currently_down = previously_downed_by.is_some();
         match (mark_down, currently_down) {
             (true, true) => {}
             (true, false) => {
+                info!("marking {} as downed by {}", servicename, downed_by);
                 let mut stmt = transaction.prepare(
-                    "INSERT INTO down_services(servicename, downed_by, downed_at) VALUES (?, ?, ?",
+                    "INSERT INTO down_services(servicename, downed_by, downed_at) VALUES (?, ?, ?)",
                 )?;
                 stmt.execute(rusqlite::params![
                     &servicename,
@@ -54,6 +59,7 @@ impl UpDownStateInner {
                 self.downed_services.insert(servicename);
             }
             (false, true) => {
+                info!("marking {} as upped by {}", servicename, downed_by);
                 let mut stmt =
                     transaction.prepare("DELETE FROM down_services WHERE servicename=?")?;
                 stmt.execute(rusqlite::params![&servicename,])?;
@@ -62,6 +68,10 @@ impl UpDownStateInner {
             (false, false) => {}
         }
         transaction.commit()
+    }
+
+    fn all_downed(&self) -> &HashSet<String> {
+        &self.downed_services
     }
 }
 
@@ -74,15 +84,12 @@ impl UpDownState {
         let conn = rusqlite::Connection::open(path)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS down_services(
-                servicename TEXT NOT NULL,
+                servicename TEXT NOT NULL PRIMARY KEY,
                 downed_by TEXT NOT NULL,
-                downed_at BIGINT NOT NULL,
-                PRIMARY KEY (servicename),
+                downed_at INT NOT NULL
             )",
             rusqlite::params![],
         )?;
-        conn.execute("PRAGMA journal_mode=WAL", rusqlite::params![])?;
-        conn.execute("PRAGMA wal_mode=TRUNCATE", rusqlite::params![])?;
         let downed_services = {
             let mut stmt = conn.prepare("SELECT servicename FROM down_services")?;
             let service_iter = stmt.query_map(rusqlite::params![], |row| row.get(0))?;
@@ -98,7 +105,7 @@ impl UpDownState {
 
     async fn is_up(&self, servicename: &str) -> bool {
         let inner = self.inner.lock().await;
-        inner.downed_services.contains("all") || inner.downed_services.contains(servicename)
+        !(inner.downed_services.contains("all") || inner.downed_services.contains(servicename))
     }
 
     async fn set_down<SN: Into<String>, UN: Into<String>>(
@@ -109,15 +116,27 @@ impl UpDownState {
         let servicename = servicename.into();
         let username = username.into();
         let mut inner = self.inner.lock().await;
-        inner.set_state(servicename, Some(username), true)?;
+        inner.set_state(servicename, username, true)?;
         Ok(())
     }
 
-    async fn set_up<SN: Into<String>>(&self, servicename: SN) -> Result<(), rusqlite::Error> {
+    async fn set_up<SN: Into<String>, UN: Into<String>>(
+        &self,
+        servicename: SN,
+        username: UN,
+    ) -> Result<(), rusqlite::Error> {
         let servicename = servicename.into();
+        let username = username.into();
         let mut inner = self.inner.lock().await;
-        inner.set_state(servicename, None, false)?;
+        inner.set_state(servicename, username, false)?;
         Ok(())
+    }
+
+    async fn all_downed(&self) -> Vec<String> {
+        let inner = self.inner.lock().await;
+        let mut v: Vec<String> = inner.all_downed().iter().map(|s| s.clone()).collect();
+        v.sort();
+        v
     }
 }
 
@@ -135,46 +154,178 @@ pub fn bind_unix_listener<P: AsRef<Path>>(path: P) -> tokio::io::Result<UnixList
     target_file_name.push(format!(".{}", std::process::id()));
     path_buf.set_file_name(target_file_name);
     let listener = UnixListener::bind(&path_buf)?;
+    std::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(0o666))?;
     std::fs::rename(path_buf, orig_path_buf)?;
     Ok(listener)
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Error, From)]
 enum AdminClientError {
     Io(tokio::io::Error),
     Db(rusqlite::Error),
+    UnableToDeterminePeerCreds,
 }
 
-impl Error for AdminClientError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            AdminClientError::Io(e) => Some(e),
-            AdminClientError::Db(e) => Some(e),
-        }
-    }
+#[derive(Debug, Display, Error, From)]
+enum AdminCommandError {
+    Io(tokio::io::Error),
+    InvalidCommand { command: String },
+    IncompleteCommand,
 }
 
-impl From<tokio::io::Error> for AdminClientError {
-    fn from(e: tokio::io::Error) -> AdminClientError {
-        AdminClientError::Io(e)
-    }
+enum AdminCommand {
+    Ping,
+    ShowAll,
+    Quit,
+    Up { servicename: String },
+    Down { servicename: String },
+    Status { servicename: String },
 }
 
-impl From<rusqlite::Error> for AdminClientError {
-    fn from(e: rusqlite::Error) -> AdminClientError {
-        AdminClientError::Db(e)
+async fn read_command<B: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut B,
+) -> Result<Option<AdminCommand>, AdminCommandError> {
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    let mut parts = line.split_whitespace();
+    let first = match parts.next() {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+    match first.to_lowercase().as_str() {
+        "ping" => Ok(Some(AdminCommand::Ping)),
+        "show-all" => Ok(Some(AdminCommand::ShowAll)),
+        "show_all" => Ok(Some(AdminCommand::ShowAll)),
+        "showall" => Ok(Some(AdminCommand::ShowAll)),
+        "quit" => Ok(Some(AdminCommand::Quit)),
+        "exit" => Ok(Some(AdminCommand::Quit)),
+        "up" => match parts.next() {
+            Some(servicename) => Ok(Some(AdminCommand::Up {
+                servicename: servicename.to_owned(),
+            })),
+            None => Err(AdminCommandError::IncompleteCommand),
+        },
+        "down" => match parts.next() {
+            Some(servicename) => Ok(Some(AdminCommand::Down {
+                servicename: servicename.to_owned(),
+            })),
+            None => Err(AdminCommandError::IncompleteCommand),
+        },
+        "status" => match parts.next() {
+            Some(servicename) => Ok(Some(AdminCommand::Status {
+                servicename: servicename.to_owned(),
+            })),
+            None => Err(AdminCommandError::IncompleteCommand),
+        },
+        other => Err(AdminCommandError::InvalidCommand {
+            command: other.to_owned(),
+        }),
     }
 }
 
 async fn handle_admin_client(
+    mut socket: tokio::net::UnixStream,
+    state: Arc<UpDownState>,
+    required_groups: Arc<Vec<String>>,
+) -> Result<(), AdminClientError> {
+    let peer = socket.peer_cred()?;
+    let username = match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(peer.uid)) {
+        Ok(Some(u)) => u.name,
+        Ok(None) => return Err(AdminClientError::UnableToDeterminePeerCreds),
+        Err(_) => return Err(AdminClientError::UnableToDeterminePeerCreds),
+    };
+    let is_authorized_to_write = if required_groups.is_empty() {
+        true
+    } else {
+        required_groups
+            .iter()
+            .any(|group| match nix::unistd::Group::from_name(group) {
+                Ok(Some(g)) => g.mem.iter().any(|u| u.as_ref() == username),
+                _ => false,
+            })
+    };
+    debug!(
+        "accepted connection from {}; is_authorized_to_write={}",
+        username, is_authorized_to_write
+    );
+    let (reader, mut writer) = socket.split();
+    let mut buffered_reader = tokio::io::BufReader::new(reader);
+    loop {
+        let command = match read_command(&mut buffered_reader).await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(AdminCommandError::IncompleteCommand) => {
+                writer
+                    .write_all(format!("ERROR incomplete command\n").as_bytes())
+                    .await?;
+                continue;
+            }
+            Err(AdminCommandError::InvalidCommand { command }) => {
+                writer
+                    .write_all(format!("ERROR unknown command {}\n", command).as_bytes())
+                    .await?;
+                continue;
+            }
+            Err(AdminCommandError::Io(e)) => return Err(AdminClientError::Io(e)),
+        };
+        let response = match command {
+            AdminCommand::Ping => Cow::Borrowed("pong"),
+            AdminCommand::Up { servicename } => {
+                if is_authorized_to_write {
+                    match state.set_up(servicename, username.clone()).await {
+                        Ok(_) => Cow::Borrowed("ok"),
+                        Err(e) => Cow::Owned(format!("ERROR unable to up service: {:?}", e)),
+                    }
+                } else {
+                    Cow::Borrowed("ERROR not authorized to write")
+                }
+            }
+            AdminCommand::Down { servicename } => {
+                if is_authorized_to_write {
+                    match state.set_down(servicename, username.clone()).await {
+                        Ok(_) => Cow::Borrowed("ok"),
+                        Err(e) => Cow::Owned(format!("ERROR unable to down service: {:?}", e)),
+                    }
+                } else {
+                    Cow::Borrowed("ERROR not authorized to write")
+                }
+            }
+            AdminCommand::Status { servicename } => {
+                if state.is_up(&servicename).await {
+                    Cow::Borrowed("up")
+                } else {
+                    Cow::Borrowed("down")
+                }
+            }
+            AdminCommand::ShowAll => {
+                let all_downed = state.all_downed().await;
+                Cow::Owned(all_downed.join(","))
+            }
+            AdminCommand::Quit => break,
+        };
+        writer.write_all(response.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+    }
+    writer.flush().await?;
+    writer.shutdown().await?;
+    Ok(())
+}
+
+async fn handle_admin_client_wrapper(
     socket: tokio::net::UnixStream,
     state: Arc<UpDownState>,
-) -> Result<(), AdminClientError> {
-    state
-        .set_down("all".to_string(), "jbrown".to_string())
-        .await?;
-    state.set_up("all".to_string()).await?;
-    unimplemented!();
+    required_groups: Arc<Vec<String>>,
+) -> () {
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        handle_admin_client(socket, state, required_groups),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => error!("error handling admin client: {:?}", e),
+        Err(d) => warn!("timeout handling admin client: {:?}", d),
+    }
 }
 
 async fn handle_tcp_client(
@@ -214,6 +365,22 @@ async fn tcp_loop(
     }
 }
 
+fn init_logging() {
+    if let Ok(log_path) = std::env::var("LOG_DGRAM_SYSLOG") {
+        syslog::init_unix_custom(
+            syslog::Facility::LOG_DAEMON,
+            std::env::var("LOG_LEVEL")
+                .unwrap_or("info".to_owned())
+                .parse()
+                .expect("could not parse $LOG_LEVEL as a syslog level"),
+            log_path,
+        )
+        .expect("could not initialize syslog");
+    } else {
+        env_logger::init();
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let matches = clap::App::new(env!("CARGO_PKG_NAME"))
@@ -238,7 +405,19 @@ async fn main() {
                 .required(true)
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("required_groups")
+                .short("g")
+                .long("required-groups")
+                .multiple(true)
+                .help(
+                    "Require the admin client to be a member of one of these UNIX groups to mutate",
+                )
+                .takes_value(true),
+        )
         .get_matches();
+
+    init_logging();
 
     let state = Arc::new(
         UpDownState::try_new(matches.value_of("db_path").unwrap())
@@ -249,6 +428,13 @@ async fn main() {
         .expect("must set $PORT")
         .parse()
         .expect("must set $PORT to an int");
+
+    let required_groups = Arc::new(
+        matches
+            .values_of("required_groups")
+            .map(|v| v.map(|s| s.to_owned()).collect())
+            .unwrap_or_else(Vec::new),
+    );
 
     let address: std::net::IpAddr = "::".parse().unwrap();
 
@@ -268,7 +454,10 @@ async fn main() {
             Ok(c) => c,
             Err(_) => break,
         };
-        let handle = Arc::clone(&state);
-        tokio::spawn(handle_admin_client(client, handle));
+        tokio::spawn(handle_admin_client_wrapper(
+            client,
+            Arc::clone(&state),
+            Arc::clone(&required_groups),
+        ));
     }
 }

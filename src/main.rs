@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -10,6 +10,7 @@ use clap::{self, Arg};
 use derive_more::{Display, Error, From};
 use log::{debug, error, info, warn};
 use rusqlite::OptionalExtension;
+use serde_derive::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
@@ -24,7 +25,13 @@ fn current_unix_timestamp() -> i64 {
 
 struct UpDownStateInner {
     conn: rusqlite::Connection,
-    downed_services: HashSet<String>,
+    downed_services: HashMap<String, ServiceDownStatus>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ServiceDownStatus {
+    downed_by: String,
+    downed_at: i64,
 }
 
 impl UpDownStateInner {
@@ -51,12 +58,15 @@ impl UpDownStateInner {
                 let mut stmt = transaction.prepare(
                     "INSERT INTO down_services(servicename, downed_by, downed_at) VALUES (?, ?, ?)",
                 )?;
-                stmt.execute(rusqlite::params![
-                    &servicename,
-                    &downed_by,
-                    current_unix_timestamp()
-                ])?;
-                self.downed_services.insert(servicename);
+                let now = current_unix_timestamp();
+                stmt.execute(rusqlite::params![&servicename, &downed_by, now])?;
+                self.downed_services.insert(
+                    servicename,
+                    ServiceDownStatus {
+                        downed_by,
+                        downed_at: now,
+                    },
+                );
             }
             (false, true) => {
                 info!("marking {} as upped by {}", servicename, downed_by);
@@ -70,7 +80,7 @@ impl UpDownStateInner {
         transaction.commit()
     }
 
-    fn all_downed(&self) -> &HashSet<String> {
+    fn all_downed(&self) -> &HashMap<String, ServiceDownStatus> {
         &self.downed_services
     }
 }
@@ -91,9 +101,18 @@ impl UpDownState {
             rusqlite::params![],
         )?;
         let downed_services = {
-            let mut stmt = conn.prepare("SELECT servicename FROM down_services")?;
-            let service_iter = stmt.query_map(rusqlite::params![], |row| row.get(0))?;
-            service_iter.collect::<Result<HashSet<String>, _>>()?
+            let mut stmt =
+                conn.prepare("SELECT servicename, downed_by, downed_at FROM down_services")?;
+            let service_iter = stmt.query_map(rusqlite::params![], |row| {
+                Ok((
+                    row.get(0)?,
+                    ServiceDownStatus {
+                        downed_by: row.get(1)?,
+                        downed_at: row.get(2)?,
+                    },
+                ))
+            })?;
+            service_iter.collect::<Result<HashMap<String, _>, _>>()?
         };
         Ok(UpDownState {
             inner: Mutex::new(UpDownStateInner {
@@ -105,7 +124,8 @@ impl UpDownState {
 
     async fn is_up(&self, servicename: &str) -> bool {
         let inner = self.inner.lock().await;
-        !(inner.downed_services.contains("all") || inner.downed_services.contains(servicename))
+        !(inner.downed_services.contains_key("all")
+            || inner.downed_services.contains_key(servicename))
     }
 
     async fn set_down<SN: Into<String>, UN: Into<String>>(
@@ -132,11 +152,9 @@ impl UpDownState {
         Ok(())
     }
 
-    async fn all_downed(&self) -> Vec<String> {
+    async fn all_downed(&self) -> HashMap<String, ServiceDownStatus> {
         let inner = self.inner.lock().await;
-        let mut v: Vec<String> = inner.all_downed().iter().map(|s| s.clone()).collect();
-        v.sort();
-        v
+        inner.all_downed().clone()
     }
 }
 
@@ -299,7 +317,7 @@ async fn handle_admin_client(
             }
             AdminCommand::ShowAll => {
                 let all_downed = state.all_downed().await;
-                Cow::Owned(all_downed.join(","))
+                Cow::Owned(serde_json::to_string(&all_downed).unwrap())
             }
             AdminCommand::Quit => break,
         };

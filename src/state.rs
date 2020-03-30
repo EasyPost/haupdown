@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use log::info;
+use log::{debug, info};
 use rusqlite::OptionalExtension;
 use serde_derive::Serialize;
 use tokio::sync::Mutex;
@@ -55,6 +55,10 @@ impl UpDownStateInner {
             })?;
             service_iter.collect::<Result<HashMap<String, _>, _>>()?
         };
+        debug!(
+            "discovered {} downed services in the db",
+            downed_services.len()
+        );
         Ok(UpDownStateInner {
             conn,
             downed_services,

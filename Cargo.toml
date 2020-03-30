@@ -1,10 +1,11 @@
 [package]
 name = "haupdown"
 version = "0.1.0"
-authors = ["James Brown <roguelazer@roguelazer.com>"]
+authors = ["EasyPost <oss@easypost.com."]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "ISC"
+readme = "README.md"
+repository = "https://github.com/EasyPost/haupdown"
 
 [dependencies]
 tokio = { version = "0.2", features = ["full"] }

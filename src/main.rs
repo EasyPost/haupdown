@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -9,154 +8,16 @@ use std::time::Duration;
 use clap::{self, Arg};
 use derive_more::{Display, Error, From};
 use log::{debug, error, info, warn};
-use rusqlite::OptionalExtension;
-use serde_derive::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
-use tokio::sync::Mutex;
 
-fn current_unix_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs() as i64
-}
+mod state;
 
-struct UpDownStateInner {
-    conn: rusqlite::Connection,
-    downed_services: HashMap<String, ServiceDownStatus>,
-}
+use state::UpDownState;
 
-#[derive(Clone, Debug, Serialize)]
-struct ServiceDownStatus {
-    downed_by: String,
-    downed_at: i64,
-}
-
-impl UpDownStateInner {
-    fn set_state(
-        &mut self,
-        servicename: String,
-        downed_by: String,
-        mark_down: bool,
-    ) -> Result<(), rusqlite::Error> {
-        let transaction = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        let previously_downed_by: Option<String> = {
-            let mut stmt =
-                transaction.prepare("SELECT * FROM down_services WHERE servicename=?")?;
-            stmt.query_row(rusqlite::params![&servicename], |row| row.get(1))
-                .optional()?
-        };
-        let currently_down = previously_downed_by.is_some();
-        match (mark_down, currently_down) {
-            (true, true) => {}
-            (true, false) => {
-                info!("marking {} as downed by {}", servicename, downed_by);
-                let mut stmt = transaction.prepare(
-                    "INSERT INTO down_services(servicename, downed_by, downed_at) VALUES (?, ?, ?)",
-                )?;
-                let now = current_unix_timestamp();
-                stmt.execute(rusqlite::params![&servicename, &downed_by, now])?;
-                self.downed_services.insert(
-                    servicename,
-                    ServiceDownStatus {
-                        downed_by,
-                        downed_at: now,
-                    },
-                );
-            }
-            (false, true) => {
-                info!("marking {} as upped by {}", servicename, downed_by);
-                let mut stmt =
-                    transaction.prepare("DELETE FROM down_services WHERE servicename=?")?;
-                stmt.execute(rusqlite::params![&servicename,])?;
-                self.downed_services.remove(&servicename);
-            }
-            (false, false) => {}
-        }
-        transaction.commit()
-    }
-
-    fn all_downed(&self) -> &HashMap<String, ServiceDownStatus> {
-        &self.downed_services
-    }
-}
-
-pub struct UpDownState {
-    inner: Mutex<UpDownStateInner>,
-}
-
-impl UpDownState {
-    pub fn try_new<P: AsRef<Path>>(path: P) -> Result<Self, rusqlite::Error> {
-        let conn = rusqlite::Connection::open(path)?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS down_services(
-                servicename TEXT NOT NULL PRIMARY KEY,
-                downed_by TEXT NOT NULL,
-                downed_at INT NOT NULL
-            )",
-            rusqlite::params![],
-        )?;
-        let downed_services = {
-            let mut stmt =
-                conn.prepare("SELECT servicename, downed_by, downed_at FROM down_services")?;
-            let service_iter = stmt.query_map(rusqlite::params![], |row| {
-                Ok((
-                    row.get(0)?,
-                    ServiceDownStatus {
-                        downed_by: row.get(1)?,
-                        downed_at: row.get(2)?,
-                    },
-                ))
-            })?;
-            service_iter.collect::<Result<HashMap<String, _>, _>>()?
-        };
-        Ok(UpDownState {
-            inner: Mutex::new(UpDownStateInner {
-                conn,
-                downed_services,
-            }),
-        })
-    }
-
-    async fn is_up(&self, servicename: &str) -> bool {
-        let inner = self.inner.lock().await;
-        !(inner.downed_services.contains_key("all")
-            || inner.downed_services.contains_key(servicename))
-    }
-
-    async fn set_down<SN: Into<String>, UN: Into<String>>(
-        &self,
-        servicename: SN,
-        username: UN,
-    ) -> Result<(), rusqlite::Error> {
-        let servicename = servicename.into();
-        let username = username.into();
-        let mut inner = self.inner.lock().await;
-        inner.set_state(servicename, username, true)?;
-        Ok(())
-    }
-
-    async fn set_up<SN: Into<String>, UN: Into<String>>(
-        &self,
-        servicename: SN,
-        username: UN,
-    ) -> Result<(), rusqlite::Error> {
-        let servicename = servicename.into();
-        let username = username.into();
-        let mut inner = self.inner.lock().await;
-        inner.set_state(servicename, username, false)?;
-        Ok(())
-    }
-
-    async fn all_downed(&self) -> HashMap<String, ServiceDownStatus> {
-        let inner = self.inner.lock().await;
-        inner.all_downed().clone()
-    }
-}
+const ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bind a listening UNIX domain socket at /foo/bar by first
 /// binding to /foo/bar.pid and atomically renaming to /foo/bar
@@ -335,7 +196,7 @@ async fn handle_admin_client_wrapper(
     required_groups: Arc<Vec<String>>,
 ) -> () {
     match tokio::time::timeout(
-        Duration::from_secs(10),
+        ADMIN_TIMEOUT,
         handle_admin_client(socket, state, required_groups),
     )
     .await
@@ -366,7 +227,7 @@ async fn handle_tcp_client(
 }
 
 async fn handle_tcp_client_wrapper(socket: tokio::net::TcpStream, state: Arc<UpDownState>) -> () {
-    match tokio::time::timeout(Duration::from_secs(10), handle_tcp_client(socket, state)).await {
+    match tokio::time::timeout(TCP_TIMEOUT, handle_tcp_client(socket, state)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => error!("error handling tcp client: {:?}", e),
         Err(d) => warn!("timeout handling tcp client: {:?}", d),
@@ -412,12 +273,24 @@ async fn main() {
                 .value_name("PATH")
                 .help("Path to bind UNIX domain socket at")
                 .required(true)
+                .env("SOCKET_BIND_PATH")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("port")
+                .short("p")
+                .long("port")
+                .env("PORT")
+                .value_name("TCP_PORT")
+                .help("TCP port to bind to for the agent protocol")
+                .required(true)
                 .takes_value(true),
         )
         .arg(
             Arg::with_name("db_path")
                 .short("d")
                 .long("db-path")
+                .env("DB_PATH")
                 .value_name("PATH")
                 .help("Path for state database")
                 .required(true)
@@ -428,6 +301,8 @@ async fn main() {
                 .short("g")
                 .long("required-groups")
                 .multiple(true)
+                .use_delimiter(true)
+                .env("REQUIRED_GROUPS")
                 .help(
                     "Require the admin client to be a member of one of these UNIX groups to mutate",
                 )
@@ -442,10 +317,11 @@ async fn main() {
             .expect("Could not initialize state database"),
     );
 
-    let port: u16 = std::env::var("PORT")
-        .expect("must set $PORT")
+    let port: u16 = matches
+        .value_of("port")
+        .unwrap()
         .parse()
-        .expect("must set $PORT to an int");
+        .expect("must set --port to a valid port number");
 
     let required_groups = Arc::new(
         matches

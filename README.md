@@ -26,5 +26,5 @@ This work is licensed under the ISC license, a copy of which can be found at [LI
 ## Logging / Monitoring
 
 If the environment `$LOG_DGRAM_SYSLOG` is set to a domain socket path, this service will log some stuff using the RFC
-3164 syslog protocol to that path. Otherwise, if `RUST_LOG` is set, it will log to stdout using the confirmation in
+3164 syslog protocol to that path. Otherwise, if `RUST_LOG` is set, it will log to stdout using the configuration in
 `RUST_LOG` according to [env_logger](https://docs.rs/env_logger/0.7.1/env_logger/).

@@ -1,8 +1,10 @@
-This is a server for the HAproxy Agent Check protocol. It is expected to run as a sidecar everywhere you run
+**haupdown** is a server for the HAproxy Agent Check protocol. It is expected to run as a sidecar everywhere you run
 HAproxy-managed services; configure HAProxy to talk to it via the
 [agent-check](http://cbonte.github.io/haproxy-dconv/2.0/configuration.html#5.2-agent-check) flag. It accepts TCP
 connections of the HAproxy agent protocol on the port specified by the environment variable `$PORT` (or `--port`) and binds a simple
 admin socket at the UNIX domain socket path specified by `$SOCKET_BIND_PATH` (or `--socket-bind-path`).
+
+[![Build Status](https://travis-ci.com/EasyPost/haupdown.svg?branch=master)](https://travis-ci.com/EasyPost/haupdown)
 
 This is basically a replacement for [hacheck](https://github.com/uber/hacheck) that only does the agent-check parts.
 

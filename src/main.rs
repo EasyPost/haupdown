@@ -21,7 +21,7 @@ const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bind a listening UNIX domain socket at /foo/bar by first
 /// binding to /foo/bar.pid and atomically renaming to /foo/bar
-pub fn bind_unix_listener<P: AsRef<Path>>(path: P) -> tokio::io::Result<UnixListener> {
+pub fn bind_unix_listener<P: AsRef<Path>>(path: P, mode: u32) -> tokio::io::Result<UnixListener> {
     let mut path_buf = path.as_ref().to_owned();
     let orig_path_buf = path_buf.clone();
     if let Ok(metadata) = std::fs::metadata(&path_buf) {
@@ -33,7 +33,7 @@ pub fn bind_unix_listener<P: AsRef<Path>>(path: P) -> tokio::io::Result<UnixList
     target_file_name.push(format!(".{}", std::process::id()));
     path_buf.set_file_name(target_file_name);
     let listener = UnixListener::bind(&path_buf)?;
-    std::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(0o666))?;
+    std::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(mode))?;
     std::fs::rename(path_buf, orig_path_buf)?;
     Ok(listener)
 }
@@ -277,6 +277,16 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("socket_mode")
+                .long("socket-mode")
+                .value_name("OCTAL_MODE")
+                .help("Mode for unix domain socket")
+                .required(true)
+                .env("SOCKET_MODE")
+                .default_value("666")
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("port")
                 .short("p")
                 .long("port")
@@ -338,8 +348,12 @@ async fn main() {
         .await
         .expect("failed to bind TCP socket");
 
-    let mut admin_socket = bind_unix_listener(matches.value_of("socket_bind_path").unwrap())
-        .expect("unable to bind UNIX listener");
+    let mut admin_socket = bind_unix_listener(
+        matches.value_of("socket_bind_path").unwrap(),
+        u32::from_str_radix(matches.value_of("socket_mode").unwrap(), 8)
+            .expect("--socket-mode must be a valid mode"),
+    )
+    .expect("unable to bind UNIX listener");
 
     tokio::spawn(tcp_loop(tcp_socket, Arc::clone(&state)));
 

@@ -260,7 +260,7 @@ fn init_logging() {
     }
 }
 
-#[tokio::main]
+#[tokio::main(core_threads = 2, max_threads = 4)]
 async fn main() {
     let matches = clap::App::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))

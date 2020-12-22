@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -142,6 +143,33 @@ impl UpDownStateInner {
             .map(|p| p.exists())
             .unwrap_or(false)
     }
+
+    fn global_down_status(&self) -> Option<ServiceDownStatus> {
+        if let Some(ref p) = self.global_down_path {
+            if let Ok(metadata) = p.metadata() {
+                let downed_by =
+                    match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(metadata.uid())) {
+                        Ok(Some(u)) => u.name,
+                        _ => metadata.uid().to_string(),
+                    };
+                Some(ServiceDownStatus {
+                    downed_by: downed_by,
+                    downed_at: metadata
+                        .modified()
+                        .map(|st| {
+                            st.duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 pub struct UpDownState {
@@ -190,7 +218,11 @@ impl UpDownState {
 
     pub async fn all_downed(&self) -> HashMap<String, ServiceDownStatus> {
         let inner = self.inner.lock().await;
-        inner.all_downed().clone()
+        let mut res = inner.all_downed().clone();
+        if let Some(s) = inner.global_down_status() {
+            res.insert("(global-down-file)".to_owned(), s);
+        }
+        res
     }
 }
 

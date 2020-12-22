@@ -50,6 +50,7 @@ enum AdminCommandError {
     Io(tokio::io::Error),
     InvalidCommand { command: String },
     IncompleteCommand,
+    HelpRequested,
 }
 
 enum AdminCommand {
@@ -96,6 +97,7 @@ async fn read_command<B: tokio::io::AsyncBufRead + Unpin>(
             })),
             None => Err(AdminCommandError::IncompleteCommand),
         },
+        "help" => Err(AdminCommandError::HelpRequested),
         other => Err(AdminCommandError::InvalidCommand {
             command: other.to_owned(),
         }),
@@ -146,6 +148,12 @@ async fn handle_admin_client(
                 continue;
             }
             Err(AdminCommandError::Io(e)) => return Err(AdminClientError::Io(e)),
+            Err(AdminCommandError::HelpRequested) => {
+                writer.write_all(
+                    format!("ERROR supported commands: ping, show-all, up SERVICENAME, down SERVICENAME, status SERVICENAME, quit, help\n").as_bytes())
+                    .await?;
+                continue;
+            }
         };
         let response = match command {
             AdminCommand::Ping => Cow::Borrowed("pong"),

@@ -145,30 +145,20 @@ impl UpDownStateInner {
     }
 
     fn global_down_status(&self) -> Option<ServiceDownStatus> {
-        if let Some(ref p) = self.global_down_path {
-            if let Ok(metadata) = p.metadata() {
+        self.global_down_path
+            .as_ref()
+            .and_then(|p| p.metadata().ok())
+            .map(|metadata| {
                 let downed_by =
                     match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(metadata.uid())) {
                         Ok(Some(u)) => u.name,
                         _ => metadata.uid().to_string(),
                     };
-                Some(ServiceDownStatus {
+                ServiceDownStatus {
                     downed_by: downed_by,
-                    downed_at: metadata
-                        .modified()
-                        .map(|st| {
-                            st.duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs() as i64)
-                                .unwrap_or(0)
-                        })
-                        .unwrap_or(0),
-                })
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+                    downed_at: metadata.mtime(),
+                }
+            })
     }
 }
 

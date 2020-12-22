@@ -17,6 +17,7 @@ fn current_unix_timestamp() -> i64 {
 struct UpDownStateInner {
     conn: rusqlite::Connection,
     downed_services: HashMap<String, ServiceDownStatus>,
+    global_down_path: Option<Box<Path>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -31,7 +32,10 @@ enum State {
 }
 
 impl UpDownStateInner {
-    pub fn try_new<P: AsRef<Path>>(path: P) -> Result<Self, rusqlite::Error> {
+    pub fn try_new<P: AsRef<Path>>(
+        path: P,
+        global_down_path: Option<Box<Path>>,
+    ) -> Result<Self, rusqlite::Error> {
         let conn = rusqlite::Connection::open(path)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS down_services(
@@ -62,6 +66,7 @@ impl UpDownStateInner {
         Ok(UpDownStateInner {
             conn,
             downed_services,
+            global_down_path: global_down_path,
         })
     }
 
@@ -127,7 +132,15 @@ impl UpDownStateInner {
     fn is_up<SN: AsRef<str>>(&self, servicename: SN) -> bool {
         let servicename = servicename.as_ref();
         !(self.downed_services.contains_key("all")
-            || self.downed_services.contains_key(servicename))
+            || self.downed_services.contains_key(servicename)
+            || self.is_global_down())
+    }
+
+    fn is_global_down(&self) -> bool {
+        self.global_down_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false)
     }
 }
 
@@ -136,8 +149,11 @@ pub struct UpDownState {
 }
 
 impl UpDownState {
-    pub fn try_new<P: AsRef<Path>>(path: P) -> Result<Self, rusqlite::Error> {
-        let inner = UpDownStateInner::try_new(path)?;
+    pub fn try_new<P: AsRef<Path>, G: AsRef<Path>>(
+        path: P,
+        global_down_path: Option<G>,
+    ) -> Result<Self, rusqlite::Error> {
+        let inner = UpDownStateInner::try_new(path, global_down_path.map(|p| p.as_ref().into()))?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
@@ -202,7 +218,7 @@ mod tests {
     fn test_state_inner_basic() {
         let dir = tempdir::TempDir::new("haupdown-test").unwrap();
         let db_path = dir.path().join("db.sqlite");
-        let mut state = UpDownStateInner::try_new(&db_path).unwrap();
+        let mut state = UpDownStateInner::try_new(&db_path, None).unwrap();
         let username = "some-user".to_string();
 
         // down and up
@@ -232,7 +248,25 @@ mod tests {
             .set_state("foo", username.clone(), State::Down)
             .expect("should be able to set state");
         assert_eq!(state.is_up("foo"), false);
-        let state = UpDownStateInner::try_new(&db_path).unwrap();
+        let state = UpDownStateInner::try_new(&db_path, None).unwrap();
         assert_eq!(state.is_up("foo"), false);
+    }
+
+    #[test]
+    fn test_global_down_path() {
+        let dir = tempdir::TempDir::new("haupdown-test").unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let global_path = dir.path().join("global_updown").into_boxed_path();
+        let state = UpDownStateInner::try_new(&db_path, Some(global_path.clone())).unwrap();
+
+        assert_eq!(state.is_up("foo"), true);
+
+        std::fs::write(&global_path, "downed by init").unwrap();
+
+        assert_eq!(state.is_up("foo"), false);
+
+        std::fs::remove_file(&global_path).unwrap();
+
+        assert_eq!(state.is_up("foo"), true);
     }
 }

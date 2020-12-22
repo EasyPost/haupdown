@@ -297,6 +297,16 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("global_down_file")
+                .short("G")
+                .long("global-down-file")
+                .env("GLOBAL_DOWN_FILE")
+                .value_name("PATH")
+                .help("Filename which, if it exists, will have all services return 'down'")
+                .required(false)
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("db_path")
                 .short("d")
                 .long("db-path")
@@ -323,8 +333,11 @@ async fn main() {
     init_logging();
 
     let state = Arc::new(
-        UpDownState::try_new(matches.value_of("db_path").unwrap())
-            .expect("Could not initialize state database"),
+        UpDownState::try_new(
+            matches.value_of("db_path").unwrap(),
+            matches.value_of("global_down_file"),
+        )
+        .expect("Could not initialize state database"),
     );
 
     let port: u16 = matches

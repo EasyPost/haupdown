@@ -11,6 +11,9 @@ This is basically a replacement for [hacheck](https://github.com/uber/hacheck) t
 Using the `--required-groups` option, you can require that connectors to the administrative socket be in one of the
 listed Unix groups in order to change state. By default, everyone who can write to it can change its state.
 
+If the `--global-down-file` (`-G`) option is provided with a path, `haupdown` will behave as through the "all" service
+is down when that path exists.
+
 This work is licensed under the ISC license, a copy of which can be found at [LICENSE.txt](LICENSE.txt).
 
 ## Admin Socket Commands

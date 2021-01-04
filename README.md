@@ -4,7 +4,7 @@ HAproxy-managed services; configure HAProxy to talk to it via the
 connections of the HAproxy agent protocol on the port specified by the environment variable `$PORT` (or `--port`) and binds a simple
 admin socket at the UNIX domain socket path specified by `$SOCKET_BIND_PATH` (or `--socket-bind-path`).
 
-[![Build Status](https://travis-ci.com/EasyPost/haupdown.svg?branch=master)](https://travis-ci.com/EasyPost/haupdown)
+![CI](https://github.com/EasyPost/haupdown/workflows/CI/badge.svg?branch=master)
 
 This is basically a replacement for [hacheck](https://github.com/uber/hacheck) that only does the agent-check parts.
 

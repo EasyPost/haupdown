@@ -238,7 +238,10 @@ mod tests {
 
     #[test]
     fn test_state_inner_basic() {
-        let dir = tempdir::TempDir::new("haupdown-test").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("haupdown-test")
+            .tempdir()
+            .unwrap();
         let db_path = dir.path().join("db.sqlite");
         let mut state = UpDownStateInner::try_new(&db_path, None).unwrap();
         let username = "some-user".to_string();
@@ -276,7 +279,10 @@ mod tests {
 
     #[test]
     fn test_global_down_path() {
-        let dir = tempdir::TempDir::new("haupdown-test").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("haupdown-test")
+            .tempdir()
+            .unwrap();
         let db_path = dir.path().join("db.sqlite");
         let global_path = dir.path().join("global_updown").into_boxed_path();
         let state = UpDownStateInner::try_new(&db_path, Some(global_path.clone())).unwrap();

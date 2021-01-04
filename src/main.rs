@@ -110,7 +110,7 @@ async fn handle_admin_client(
     required_groups: Arc<Vec<String>>,
 ) -> Result<(), AdminClientError> {
     let peer = socket.peer_cred()?;
-    let username = match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(peer.uid)) {
+    let username = match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(peer.uid())) {
         Ok(Some(u)) => u.name,
         Ok(None) => return Err(AdminClientError::UnableToDeterminePeerCreds),
         Err(_) => return Err(AdminClientError::UnableToDeterminePeerCreds),
@@ -242,10 +242,7 @@ async fn handle_tcp_client_wrapper(socket: tokio::net::TcpStream, state: Arc<UpD
     }
 }
 
-async fn tcp_loop(
-    mut socket: TcpListener,
-    state: Arc<UpDownState>,
-) -> Result<(), tokio::io::Error> {
+async fn tcp_loop(socket: TcpListener, state: Arc<UpDownState>) -> Result<(), tokio::io::Error> {
     loop {
         let (client, _) = socket.accept().await?;
         tokio::spawn(handle_tcp_client_wrapper(client, Arc::clone(&state)));
@@ -268,7 +265,7 @@ fn init_logging() {
     }
 }
 
-#[tokio::main(core_threads = 2, max_threads = 4)]
+#[tokio::main(worker_threads = 2)]
 async fn main() {
     let matches = clap::App::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
@@ -369,7 +366,7 @@ async fn main() {
         .await
         .expect("failed to bind TCP socket");
 
-    let mut admin_socket = bind_unix_listener(
+    let admin_socket = bind_unix_listener(
         matches.value_of("socket_bind_path").unwrap(),
         u32::from_str_radix(matches.value_of("socket_mode").unwrap(), 8)
             .expect("--socket-mode must be a valid mode"),

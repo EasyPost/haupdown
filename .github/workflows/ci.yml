@@ -57,3 +57,5 @@ jobs:
         override: true
     - name: cargo audit
       uses: actions-rs/audit-check@v1.2.0
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}

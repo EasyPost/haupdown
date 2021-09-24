@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{self, Arg};
-use derive_more::{Display, Error, From};
 use log::{debug, error, info, warn};
+use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
@@ -38,18 +38,25 @@ pub fn bind_unix_listener<P: AsRef<Path>>(path: P, mode: u32) -> tokio::io::Resu
     Ok(listener)
 }
 
-#[derive(Debug, Display, Error, From)]
+#[derive(Debug, Error)]
 enum AdminClientError {
-    Io(tokio::io::Error),
-    Db(rusqlite::Error),
+    #[error("I/O error reading/writing from client: {0})")]
+    Io(#[from] tokio::io::Error),
+    #[error("sqlite error doing admin work in database: {0}")]
+    Db(#[from] rusqlite::Error),
+    #[error("system error determing peer of UNIX domain socket")]
     UnableToDeterminePeerCreds,
 }
 
-#[derive(Debug, Display, Error, From)]
+#[derive(Debug, Error)]
 enum AdminCommandError {
-    Io(tokio::io::Error),
+    #[error("I/O error executing command: {0}")]
+    Io(#[from] tokio::io::Error),
+    #[error("Invalid command {command}")]
     InvalidCommand { command: String },
+    #[error("Incomplete command")]
     IncompleteCommand,
+    #[error("User requested help instead of a command")]
     HelpRequested,
 }
 

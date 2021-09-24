@@ -3,7 +3,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Duration;
 
-use log::{debug, info};
+use log::{debug, error, info};
 use rusqlite::OptionalExtension;
 use serde_derive::Serialize;
 use tokio::sync::Mutex;
@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 fn current_unix_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
+        .unwrap_or_else(|_| Duration::from_secs(0))
         .as_secs() as i64
 }
 
@@ -19,6 +19,7 @@ struct UpDownStateInner {
     conn: rusqlite::Connection,
     downed_services: HashMap<String, ServiceDownStatus>,
     global_down_path: Option<Box<Path>>,
+    last_transaction_succeeded: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,6 +47,12 @@ impl UpDownStateInner {
             )",
             rusqlite::params![],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS healthcheck(
+                last_touched_at INT NOT NULL
+            )",
+            rusqlite::params![],
+        )?;
         let downed_services = {
             let mut stmt =
                 conn.prepare("SELECT servicename, downed_by, downed_at FROM down_services")?;
@@ -64,11 +71,51 @@ impl UpDownStateInner {
             "discovered {} downed services in the db",
             downed_services.len()
         );
-        Ok(UpDownStateInner {
+        let mut s = UpDownStateInner {
             conn,
             downed_services,
-            global_down_path: global_down_path,
-        })
+            global_down_path,
+            last_transaction_succeeded: true,
+        };
+        if let Err(e) = s.update_healthcheck() {
+            error!("Error initializing healthcheck: {:?}", e);
+        }
+        Ok(s)
+    }
+
+    fn update_healthcheck(&mut self) -> Result<(), rusqlite::Error> {
+        debug!("running healthcheck");
+        match self.update_healthcheck_inner() {
+            Ok(_) => {
+                self.last_transaction_succeeded = true;
+                Ok(())
+            }
+            Err(e) => {
+                error!("Error interacting with sqlite: {:?}; marking all services as down until next successful transaction", e);
+                self.last_transaction_succeeded = false;
+                Err(e)
+            }
+        }
+    }
+
+    fn update_healthcheck_inner(&mut self) -> Result<(), rusqlite::Error> {
+        let mut transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+        transaction.set_drop_behavior(rusqlite::DropBehavior::Rollback);
+        {
+            let mut stmt =
+                transaction.prepare("SELECT last_touched_at FROM healthcheck LIMIT 1")?;
+            let exists = stmt.query_map(rusqlite::params![], |_| Ok(()))?.count();
+            let mut stmt = if exists == 0 {
+                transaction.prepare("INSERT INTO healthcheck(last_touched_at) VALUES(?)")?
+            } else {
+                transaction.prepare("UPDATE healthcheck SET last_touched_at=?")?
+            };
+            stmt.execute(rusqlite::params![current_unix_timestamp()])?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     fn set_state<SN, UN>(
@@ -81,15 +128,34 @@ impl UpDownStateInner {
         SN: Into<String>,
         UN: Into<String>,
     {
-        let servicename = servicename.into();
-        let downed_by = downed_by.into();
-        let transaction = self
+        match self.set_state_inner(servicename.into(), downed_by.into(), target_state) {
+            Ok(true) => {
+                self.last_transaction_succeeded = true;
+                Ok(())
+            }
+            Ok(false) => Ok(()),
+            Err(e) => {
+                error!("Error interacting with sqlite: {:?}; marking all services as down until next successful transaction", e);
+                self.last_transaction_succeeded = false;
+                Err(e)
+            }
+        }
+    }
+
+    fn set_state_inner(
+        &mut self,
+        servicename: String,
+        downed_by: String,
+        target_state: State,
+    ) -> Result<bool, rusqlite::Error> {
+        let mut transaction = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+        transaction.set_drop_behavior(rusqlite::DropBehavior::Rollback);
         let previously_downed_by: Option<String> = {
             let mut stmt =
-                transaction.prepare("SELECT * FROM down_services WHERE servicename=?")?;
-            stmt.query_row(rusqlite::params![&servicename], |row| row.get(1))
+                transaction.prepare("SELECT downed_by FROM down_services WHERE servicename=?")?;
+            stmt.query_row(rusqlite::params![&servicename], |row| row.get(0))
                 .optional()?
         };
         let current_state = if previously_downed_by.is_some() {
@@ -98,8 +164,8 @@ impl UpDownStateInner {
             State::Up
         };
         match (target_state, current_state) {
-            (State::Up, State::Up) => {}
-            (State::Down, State::Down) => {}
+            (State::Up, State::Up) => return Ok(false),
+            (State::Down, State::Down) => return Ok(false),
             (State::Down, State::Up) => {
                 info!("marking {} as downed by {}", servicename, downed_by);
                 let mut stmt = transaction.prepare(
@@ -123,7 +189,8 @@ impl UpDownStateInner {
                 self.downed_services.remove(&servicename);
             }
         }
-        transaction.commit()
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn all_downed(&self) -> &HashMap<String, ServiceDownStatus> {
@@ -132,9 +199,14 @@ impl UpDownStateInner {
 
     fn is_up<SN: AsRef<str>>(&self, servicename: SN) -> bool {
         let servicename = servicename.as_ref();
-        !(self.downed_services.contains_key("all")
-            || self.downed_services.contains_key(servicename)
-            || self.is_global_down())
+        self.is_healthy()
+            && !(self.downed_services.contains_key("all")
+                || self.downed_services.contains_key(servicename)
+                || self.is_global_down())
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.last_transaction_succeeded
     }
 
     fn is_global_down(&self) -> bool {
@@ -155,7 +227,7 @@ impl UpDownStateInner {
                         _ => metadata.uid().to_string(),
                     };
                 ServiceDownStatus {
-                    downed_by: downed_by,
+                    downed_by,
                     downed_at: metadata.mtime(),
                 }
             })
@@ -175,6 +247,11 @@ impl UpDownState {
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    pub async fn update_healthcheck(&self) -> Result<(), rusqlite::Error> {
+        let mut inner = self.inner.lock().await;
+        inner.update_healthcheck()
     }
 
     pub async fn is_up(&self, servicename: &str) -> bool {

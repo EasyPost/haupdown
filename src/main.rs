@@ -18,6 +18,7 @@ use state::UpDownState;
 
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
+const HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Bind a listening UNIX domain socket at /foo/bar by first
 /// binding to /foo/bar.pid and atomically renaming to /foo/bar
@@ -26,7 +27,7 @@ pub fn bind_unix_listener<P: AsRef<Path>>(path: P, mode: u32) -> tokio::io::Resu
     let orig_path_buf = path_buf.clone();
     if let Ok(metadata) = std::fs::metadata(&path_buf) {
         if !metadata.file_type().is_socket() {
-            panic!(format!("pre-existing non-socket file at {:?}", path_buf));
+            panic!("pre-existing non-socket file at {:?}", path_buf);
         }
     }
     let mut target_file_name = path_buf.file_name().unwrap().to_owned();
@@ -144,7 +145,7 @@ async fn handle_admin_client(
             Ok(None) => break,
             Err(AdminCommandError::IncompleteCommand) => {
                 writer
-                    .write_all(format!("ERROR incomplete command\n").as_bytes())
+                    .write_all("ERROR incomplete command\n".as_bytes())
                     .await?;
                 continue;
             }
@@ -157,7 +158,7 @@ async fn handle_admin_client(
             Err(AdminCommandError::Io(e)) => return Err(AdminClientError::Io(e)),
             Err(AdminCommandError::HelpRequested) => {
                 writer.write_all(
-                    format!("ERROR supported commands: ping, show-all, up SERVICENAME, down SERVICENAME, status SERVICENAME, quit, help\n").as_bytes())
+                    "ERROR supported commands: ping, show-all, up SERVICENAME, down SERVICENAME, status SERVICENAME, quit, help\n".as_bytes())
                     .await?;
                 continue;
             }
@@ -209,7 +210,7 @@ async fn handle_admin_client_wrapper(
     socket: tokio::net::UnixStream,
     state: Arc<UpDownState>,
     required_groups: Arc<Vec<String>>,
-) -> () {
+) {
     match tokio::time::timeout(
         ADMIN_TIMEOUT,
         handle_admin_client(socket, state, required_groups),
@@ -241,11 +242,22 @@ async fn handle_tcp_client(
     Ok(())
 }
 
-async fn handle_tcp_client_wrapper(socket: tokio::net::TcpStream, state: Arc<UpDownState>) -> () {
+async fn handle_tcp_client_wrapper(socket: tokio::net::TcpStream, state: Arc<UpDownState>) {
     match tokio::time::timeout(TCP_TIMEOUT, handle_tcp_client(socket, state)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => error!("error handling tcp client: {:?}", e),
         Err(d) => warn!("timeout handling tcp client: {:?}", d),
+    }
+}
+
+async fn healthcheck_loop(state: Arc<UpDownState>) {
+    let mut healthcheck_timer = tokio::time::interval(HEALTHCHECK_INTERVAL);
+    healthcheck_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        healthcheck_timer.tick().await;
+        if let Err(e) = state.update_healthcheck().await {
+            warn!("Error updating healthcheck: {:?}", e);
+        }
     }
 }
 
@@ -261,7 +273,7 @@ fn init_logging() {
         syslog::init_unix_custom(
             syslog::Facility::LOG_DAEMON,
             std::env::var("LOG_LEVEL")
-                .unwrap_or("info".to_owned())
+                .unwrap_or_else(|_| "info".to_owned())
                 .parse()
                 .expect("could not parse $LOG_LEVEL as a syslog level"),
             log_path,
@@ -380,13 +392,10 @@ async fn main() {
     )
     .expect("unable to bind UNIX listener");
 
+    tokio::spawn(healthcheck_loop(Arc::clone(&state)));
     tokio::spawn(tcp_loop(tcp_socket, Arc::clone(&state)));
 
-    loop {
-        let (client, _) = match admin_socket.accept().await {
-            Ok(c) => c,
-            Err(_) => break,
-        };
+    while let Ok((client, _)) = admin_socket.accept().await {
         tokio::spawn(handle_admin_client_wrapper(
             client,
             Arc::clone(&state),

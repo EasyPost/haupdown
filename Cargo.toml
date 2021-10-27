@@ -11,9 +11,9 @@ repository = "https://github.com/EasyPost/haupdown"
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 clap = "2"
-rusqlite = "^0.24"
+rusqlite = "^0.26"
 log = "0.4"
-env_logger = "0.7"
+env_logger = "0.9"
 syslog = "5"
 thiserror = "1"
 nix = "^0.23"

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::{self, Arg};
 use log::{debug, error, info, warn};
 use thiserror::Error;
@@ -129,7 +130,7 @@ async fn handle_admin_client(
         required_groups
             .iter()
             .any(|group| match nix::unistd::Group::from_name(group) {
-                Ok(Some(g)) => g.mem.iter().any(|u| u.as_ref() == username),
+                Ok(Some(g)) => g.mem.iter().any(|u| u == &username),
                 _ => false,
             })
     };
@@ -268,31 +269,57 @@ async fn tcp_loop(socket: TcpListener, state: Arc<UpDownState>) -> Result<(), to
     }
 }
 
-fn init_logging() {
-    if let Ok(log_path) = std::env::var("LOG_DGRAM_SYSLOG") {
-        syslog::init_unix_custom(
-            syslog::Facility::LOG_DAEMON,
-            std::env::var("LOG_LEVEL")
-                .unwrap_or_else(|_| "info".to_owned())
-                .parse()
-                .expect("could not parse $LOG_LEVEL as a syslog level"),
-            log_path,
-        )
-        .expect("could not initialize syslog");
-    } else {
-        env_logger::init();
-    }
+#[derive(Debug, PartialEq, Eq)]
+enum LogDest {
+    Syslog,
+    Stderr,
 }
 
-#[tokio::main(worker_threads = 2)]
-async fn main() {
-    let matches = clap::App::new(env!("CARGO_PKG_NAME"))
-        .version(env!("CARGO_PKG_VERSION"))
-        .author("EasyPost <oss@easypost.com>")
-        .about(env!("CARGO_PKG_DESCRIPTION"))
+#[derive(Debug, Error)]
+enum LogError {
+    #[error("Error configuring syslog: {0}")]
+    Syslog(#[from] syslog::Error),
+}
+
+fn init_logging(matches: &clap::ArgMatches) -> Result<(), LogError> {
+    let log_dest = match (
+        matches.is_present("stderr"),
+        matches.is_present("syslog"),
+        std::env::var("LOG_DGRAM_SYSLOG").is_ok(),
+        atty::is(atty::Stream::Stderr),
+    ) {
+        (true, false, _, _) => LogDest::Stderr,
+        (false, true, _, _) => LogDest::Syslog,
+        (_, _, true, _) => LogDest::Syslog,
+        (_, _, false, true) => LogDest::Stderr,
+        (_, _, false, false) => LogDest::Stderr,
+    };
+    let log_level: log::LevelFilter = matches.value_of_t_or_exit("log-level");
+    if log_dest == LogDest::Syslog {
+        if let Ok(log_path) = std::env::var("LOG_DGRAM_SYSLOG") {
+            syslog::init_unix_custom(syslog::Facility::LOG_DAEMON, log_level, log_path)?;
+        } else {
+            syslog::init_unix(syslog::Facility::LOG_DAEMON, log_level)?;
+        };
+    } else {
+        env_logger::Builder::new()
+            .filter_level(log_level)
+            .default_format()
+            .format_timestamp_millis()
+            .target(env_logger::Target::Stderr)
+            .init();
+    }
+    Ok(())
+}
+
+fn cli() -> clap::App<'static> {
+    clap::App::new(clap::crate_name!())
+        .version(clap::crate_version!())
+        .author(clap::crate_authors!())
+        .about(clap::crate_description!())
         .arg(
-            Arg::with_name("socket_bind_path")
-                .short("s")
+            Arg::new("socket_bind_path")
+                .short('s')
                 .long("socket-bind-path")
                 .value_name("PATH")
                 .help("Path to bind UNIX domain socket at")
@@ -301,18 +328,17 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("socket_mode")
+            Arg::new("socket_mode")
                 .long("socket-mode")
                 .value_name("OCTAL_MODE")
                 .help("Mode for unix domain socket")
-                .required(true)
                 .env("SOCKET_MODE")
                 .default_value("666")
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("port")
-                .short("p")
+            Arg::new("port")
+                .short('p')
                 .long("port")
                 .env("PORT")
                 .value_name("TCP_PORT")
@@ -321,8 +347,18 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("global_down_file")
-                .short("G")
+            Arg::new("bind-host")
+               .short('B')
+               .long("bind-host")
+               .env("BIND_HOST")
+               .default_value("::")
+               .multiple_occurrences(true)
+               .takes_value(true)
+               .help("IP address or hostname to bind for the agent protocol. May be repeated.")
+        )
+        .arg(
+            Arg::new("global_down_file")
+                .short('G')
                 .long("global-down-file")
                 .env("GLOBAL_DOWN_FILE")
                 .value_name("PATH")
@@ -331,8 +367,8 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("db_path")
-                .short("d")
+            Arg::new("db_path")
+                .short('d')
                 .long("db-path")
                 .env("DB_PATH")
                 .value_name("PATH")
@@ -341,34 +377,61 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("required_groups")
-                .short("g")
+            Arg::new("required_groups")
+                .short('g')
                 .long("required-groups")
-                .multiple(true)
+                .multiple_values(true)
+                .require_delimiter(true)
                 .use_delimiter(true)
                 .env("REQUIRED_GROUPS")
                 .help(
-                    "Require the admin client to be a member of one of these UNIX groups to mutate",
+                    "Require the admin client to be a member of one of these UNIX groups to mutate. Comma-separated list.",
                 )
                 .takes_value(true),
         )
-        .get_matches();
+        .help_heading("LOGGING OPTIONS")
+        .arg(
+            Arg::new("stderr")
+                .short('E')
+                .long("stderr")
+                .conflicts_with("syslog")
+                .help("Force logging to stderr")
+        )
+        .arg(
+            Arg::new("syslog")
+                .short('Y')
+                .long("syslog")
+                .conflicts_with("stderr")
+                .help("Force logging to syslog")
+        )
+        .arg(
+            Arg::new("log-level")
+                .short('l')
+                .long("log-level")
+                .possible_values(&["trace", "debug", "info", "warn", "error"])
+                .default_value("info")
+                .takes_value(true)
+                .help("Log level")
+        )
+}
 
-    init_logging();
+#[tokio::main(worker_threads = 2)]
+async fn main() -> anyhow::Result<()> {
+    let matches = cli().get_matches();
+
+    init_logging(&matches)
+        .map_err(|e| anyhow::anyhow!("non-sync log error: {:?}", e))
+        .context("unable to initialize logging")?;
 
     let state = Arc::new(
         UpDownState::try_new(
-            matches.value_of("db_path").unwrap(),
+            matches.value_of_t_or_exit::<std::path::PathBuf>("db_path"),
             matches.value_of("global_down_file"),
         )
-        .expect("Could not initialize state database"),
+        .context("unable to initialize state database")?,
     );
 
-    let port: u16 = matches
-        .value_of("port")
-        .unwrap()
-        .parse()
-        .expect("must set --port to a valid port number");
+    let port: u16 = matches.value_of_t_or_exit("port");
 
     let required_groups = Arc::new(
         matches
@@ -377,23 +440,25 @@ async fn main() {
             .unwrap_or_else(Vec::new),
     );
 
-    let address: std::net::IpAddr = "::".parse().unwrap();
+    let addresses: Vec<std::net::IpAddr> = matches.values_of_t_or_exit("bind-host");
 
-    info!("binding on {:?}:{}", address, port);
+    for address in addresses {
+        info!("binding on {:?}:{}", address, port);
 
-    let tcp_socket = TcpListener::bind((address, port))
-        .await
-        .expect("failed to bind TCP socket");
+        let tcp_socket = TcpListener::bind((address, port))
+            .await
+            .with_context(|| format!("binding TCP socket on {:?}:{}", address, port))?;
+        tokio::spawn(tcp_loop(tcp_socket, Arc::clone(&state)));
+    }
 
     let admin_socket = bind_unix_listener(
-        matches.value_of("socket_bind_path").unwrap(),
+        matches.value_of_t_or_exit::<std::path::PathBuf>("socket_bind_path"),
         u32::from_str_radix(matches.value_of("socket_mode").unwrap(), 8)
-            .expect("--socket-mode must be a valid mode"),
+            .context("parsing --socket-mode as a valid octal mode")?,
     )
-    .expect("unable to bind UNIX listener");
+    .context("unable to bind UNIX listener")?;
 
     tokio::spawn(healthcheck_loop(Arc::clone(&state)));
-    tokio::spawn(tcp_loop(tcp_socket, Arc::clone(&state)));
 
     while let Ok((client, _)) = admin_socket.accept().await {
         tokio::spawn(handle_admin_client_wrapper(
@@ -401,5 +466,16 @@ async fn main() {
             Arc::clone(&state),
             Arc::clone(&required_groups),
         ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cli;
+
+    #[test]
+    fn test_cli_debug_assert() {
+        cli().debug_assert();
     }
 }

@@ -2,24 +2,25 @@
 name = "haupdown"
 version = "0.1.0"
 description = "haproxy agent-check daemon"
-authors = ["EasyPost <oss@easypost.com."]
-edition = "2018"
+authors = ["EasyPost <oss@easypost.com>"]
+edition = "2021"
 license = "ISC"
 readme = "README.md"
 repository = "https://github.com/EasyPost/haupdown"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
-clap = "2"
-rusqlite = "^0.24"
+anyhow = "1"
+atty = "0.2"
+clap = { version = "3", features = ["env", "cargo", "color"] }
+env_logger = "0.9"
 log = "0.4"
-env_logger = "0.7"
-syslog = "5"
-thiserror = "1"
 nix = "^0.23"
-serde_derive = "1"
+rusqlite = "^0.26"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde = "1"
+syslog = "6"
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 tempfile = "3"

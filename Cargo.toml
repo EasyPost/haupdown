@@ -2,13 +2,15 @@
 name = "haupdown"
 version = "0.1.0"
 description = "haproxy agent-check daemon"
-authors = ["EasyPost <oss@easypost.com."]
+authors = ["EasyPost <oss@easypost.com>"]
 edition = "2021"
 license = "ISC"
 readme = "README.md"
 repository = "https://github.com/EasyPost/haupdown"
 
 [dependencies]
+anyhow = "1"
+atty = "0.2"
 clap = { version = "3", features = ["env", "cargo", "color"] }
 env_logger = "0.9"
 log = "0.4"

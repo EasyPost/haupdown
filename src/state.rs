@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use log::{debug, error, info};
 use rusqlite::OptionalExtension;
-use serde_derive::Serialize;
+use serde::Serialize;
 use tokio::sync::Mutex;
 
 fn current_unix_timestamp() -> i64 {

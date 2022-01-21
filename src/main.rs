@@ -129,7 +129,7 @@ async fn handle_admin_client(
         required_groups
             .iter()
             .any(|group| match nix::unistd::Group::from_name(group) {
-                Ok(Some(g)) => g.mem.iter().any(|u| u.as_ref() == username),
+                Ok(Some(g)) => g.mem.iter().any(|u| u == &username),
                 _ => false,
             })
     };
@@ -286,13 +286,13 @@ fn init_logging() {
 
 #[tokio::main(worker_threads = 2)]
 async fn main() {
-    let matches = clap::App::new(env!("CARGO_PKG_NAME"))
-        .version(env!("CARGO_PKG_VERSION"))
-        .author("EasyPost <oss@easypost.com>")
-        .about(env!("CARGO_PKG_DESCRIPTION"))
+    let matches = clap::App::new(clap::crate_name!())
+        .version(clap::crate_version!())
+        .author(clap::crate_authors!())
+        .about(clap::crate_description!())
         .arg(
-            Arg::with_name("socket_bind_path")
-                .short("s")
+            Arg::new("socket_bind_path")
+                .short('s')
                 .long("socket-bind-path")
                 .value_name("PATH")
                 .help("Path to bind UNIX domain socket at")
@@ -301,7 +301,7 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("socket_mode")
+            Arg::new("socket_mode")
                 .long("socket-mode")
                 .value_name("OCTAL_MODE")
                 .help("Mode for unix domain socket")
@@ -311,8 +311,8 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("port")
-                .short("p")
+            Arg::new("port")
+                .short('p')
                 .long("port")
                 .env("PORT")
                 .value_name("TCP_PORT")
@@ -321,8 +321,8 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("global_down_file")
-                .short("G")
+            Arg::new("global_down_file")
+                .short('G')
                 .long("global-down-file")
                 .env("GLOBAL_DOWN_FILE")
                 .value_name("PATH")
@@ -331,8 +331,8 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("db_path")
-                .short("d")
+            Arg::new("db_path")
+                .short('d')
                 .long("db-path")
                 .env("DB_PATH")
                 .value_name("PATH")
@@ -341,10 +341,10 @@ async fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("required_groups")
-                .short("g")
+            Arg::new("required_groups")
+                .short('g')
                 .long("required-groups")
-                .multiple(true)
+                .multiple_occurrences(true)
                 .use_delimiter(true)
                 .env("REQUIRED_GROUPS")
                 .help(

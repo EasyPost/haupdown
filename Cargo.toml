@@ -1,6 +1,6 @@
 [package]
 name = "haupdown"
-version = "0.1.0"
+version = "0.2.0"
 description = "haproxy agent-check daemon"
 authors = ["EasyPost <oss@easypost.com>"]
 edition = "2021"

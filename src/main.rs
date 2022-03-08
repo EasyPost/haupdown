@@ -312,8 +312,8 @@ fn init_logging(matches: &clap::ArgMatches) -> Result<(), LogError> {
     Ok(())
 }
 
-fn cli() -> clap::App<'static> {
-    clap::App::new(clap::crate_name!())
+fn cli() -> clap::Command<'static> {
+    clap::Command::new(clap::crate_name!())
         .version(clap::crate_version!())
         .author(clap::crate_authors!())
         .about(clap::crate_description!())
@@ -381,15 +381,15 @@ fn cli() -> clap::App<'static> {
                 .short('g')
                 .long("required-groups")
                 .multiple_values(true)
-                .require_delimiter(true)
-                .use_delimiter(true)
+                .require_value_delimiter(true)
+                .use_value_delimiter(true)
                 .env("REQUIRED_GROUPS")
                 .help(
                     "Require the admin client to be a member of one of these UNIX groups to mutate. Comma-separated list.",
                 )
                 .takes_value(true),
         )
-        .help_heading("LOGGING OPTIONS")
+        .next_help_heading("LOGGING OPTIONS")
         .arg(
             Arg::new("stderr")
                 .short('E')

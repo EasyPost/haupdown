@@ -1,3 +1,7 @@
+0.2.1
+-----
+- Bump some dependencies, including bumping the `regex` crate for [RUSTSEC-2022-0013](https://rustsec.org/advisories/RUSTSEC-2022-0013.html)
+
 0.2.0
 -----
 - First real version

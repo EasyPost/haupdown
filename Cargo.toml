@@ -1,6 +1,6 @@
 [package]
 name = "haupdown"
-version = "0.2.0"
+version = "0.2.1"
 description = "haproxy agent-check daemon"
 authors = ["EasyPost <oss@easypost.com>"]
 edition = "2021"
@@ -11,11 +11,11 @@ repository = "https://github.com/EasyPost/haupdown"
 [dependencies]
 anyhow = "1"
 atty = "0.2"
-clap = { version = "3", features = ["env", "cargo", "color"] }
+clap = { version = "3.1", features = ["env", "cargo", "color"] }
 env_logger = "0.9"
 log = "0.4"
 nix = "^0.23"
-rusqlite = "^0.26"
+rusqlite = "^0.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 syslog = "6"
